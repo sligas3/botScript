@@ -4,7 +4,15 @@ import { Client, GatewayIntentBits, ChannelType, PermissionsBitField, EmbedBuild
 import { sendAnnouncement } from "./sendAnnouncement.js";
 import http from "http";
 
-http.createServer((_, res) => res.end("OK")).listen(process.env.PORT ?? 3000);
+http.createServer((req, res) => {
+  if (req.url === "/health") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ status: "ok", bot: client.user?.tag ?? "connecting" }));
+  } else {
+    res.writeHead(404);
+    res.end();
+  }
+}).listen(process.env.PORT ?? 3000);
 
 const {
   DISCORD_TOKEN,
