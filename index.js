@@ -2,6 +2,9 @@
 import "dotenv/config";
 import { Client, GatewayIntentBits, ChannelType, PermissionsBitField, EmbedBuilder } from "discord.js";
 import { sendAnnouncement } from "./sendAnnouncement.js";
+import http from "http";
+
+http.createServer((_, res) => res.end("OK")).listen(process.env.PORT ?? 3000);
 
 const {
   DISCORD_TOKEN,
