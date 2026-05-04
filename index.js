@@ -76,6 +76,9 @@ const client = new Client({
   ],
 });
 
+const WELCOME_DEDUP_TTL_MS = 45 * 1000;
+const welcomeDedup = new Map();
+
 client.once("clientReady", async () => {
   console.log(`✅ Bot conectado como ${client.user.tag}`);
 });
@@ -86,7 +89,15 @@ client.on("guildMemberAdd", async (member) => {
   try {
     if (!WELCOME_CHANNEL_ID) return;
 
-    const channel = await member.guild.channels.fetch(process.env.WELCOME_CHANNEL_ID);
+    const dedupKey = `${member.guild.id}:${member.id}`;
+    if (welcomeDedup.has(dedupKey)) {
+      console.log(`[WELCOME] duplicate suppressed for ${member.user.tag}`);
+      return;
+    }
+    welcomeDedup.set(dedupKey, Date.now());
+    setTimeout(() => welcomeDedup.delete(dedupKey), WELCOME_DEDUP_TTL_MS);
+
+    const channel = await member.guild.channels.fetch(WELCOME_CHANNEL_ID);
     if (!channel || !channel.isTextBased()) return;
 
     const embed = new EmbedBuilder()
