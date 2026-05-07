@@ -3,6 +3,7 @@ import "dotenv/config";
 import { Client, GatewayIntentBits, ChannelType, PermissionsBitField, EmbedBuilder } from "discord.js";
 import { sendAnnouncement } from "./sendAnnouncement.js";
 import http from "http";
+import os from "os";
 
 http.createServer((req, res) => {
   if (req.url === "/health") {
@@ -78,9 +79,43 @@ const client = new Client({
 
 const WELCOME_DEDUP_TTL_MS = 45 * 1000;
 const welcomeDedup = new Map();
+const MESSAGE_DEDUP_TTL_MS = 15 * 1000;
+const processedMessages = new Map();
+const BOT_INSTANCE_TAG = process.env.BOT_INSTANCE_TAG ?? `${os.hostname()}#${process.pid}`;
+
+function logResponseOrigin(context) {
+  const {
+    command,
+    message,
+    action,
+    requested,
+    deleted,
+    skipped,
+    failed,
+    dryRun,
+  } = context;
+
+  console.log(
+    [
+      "[BOT RESPONSE]",
+      `instance=${BOT_INSTANCE_TAG}`,
+      `command=${command}`,
+      `action=${action}`,
+      `dryRun=${dryRun}`,
+      `requested=${requested}`,
+      `deleted=${deleted}`,
+      `skipped=${skipped}`,
+      `failed=${failed}`,
+      `guild=${message.guild?.id}`,
+      `channel=${message.channel?.id}`,
+      `message=${message.id}`,
+      `author=${message.author?.id}`,
+    ].join(" ")
+  );
+}
 
 client.once("clientReady", async () => {
-  console.log(`✅ Bot conectado como ${client.user.tag}`);
+  console.log(`✅ Bot conectado como ${client.user.tag} | instance=${BOT_INSTANCE_TAG}`);
 });
 
 // ============ Saludo de bienvenida (EMBED) ============
@@ -125,6 +160,14 @@ client.on("messageCreate", async (message) => {
   console.log("[MSG]", message.channel?.name, ":", message.content);
   try {
     if (message.author.bot) return;
+
+    const seenAt = processedMessages.get(message.id);
+    if (seenAt && Date.now() - seenAt < MESSAGE_DEDUP_TTL_MS) {
+      return;
+    }
+    processedMessages.set(message.id, Date.now());
+    setTimeout(() => processedMessages.delete(message.id), MESSAGE_DEDUP_TTL_MS);
+
     const unrestrictedCommands = ["!coffee", "!mate"];
     const isUnrestricted = unrestrictedCommands.some((c) => message.content.startsWith(c));
 
@@ -285,6 +328,145 @@ client.on("messageCreate", async (message) => {
       }
 
       await message.channel.send("```\n" + lines.join("\n") + "\n```");
+      logResponseOrigin({
+        command: "!delete-channel",
+        message,
+        action: doConfirm ? "delete" : "dry-run",
+        requested: results.requested,
+        deleted: results.deleted.length,
+        skipped: results.skipped.length,
+        failed: results.failed.length,
+        dryRun,
+      });
+      return;
+    }
+
+    if (message.content.startsWith("!delete-category")) {
+      const args = message.content.split(/\s+/).slice(1).filter(Boolean);
+      const dryRun = args.includes("--dry-run");
+      const doConfirm = args.includes("--confirm");
+
+      if (!dryRun && !doConfirm) {
+        return message.reply("🧹 Uso: `!delete-category --dry-run <#categoria|categoria_id>...` o `!delete-category --confirm <#categoria|categoria_id>...`");
+      }
+
+      if (!message.member.permissions.has(PermissionsBitField.Flags.ManageChannels)) {
+        return message.reply("❌ Necesitas el permiso **ManageChannels** para usar este comando.");
+      }
+
+      const botMember = message.guild.members.me;
+      if (!botMember?.permissions.has(PermissionsBitField.Flags.ManageChannels)) {
+        return message.reply("❌ No tengo permiso **ManageChannels** para eliminar categorías.");
+      }
+
+      const rawTargets = args.filter((a) => a !== "--dry-run" && a !== "--confirm");
+      if (rawTargets.length === 0) {
+        return message.reply("⚠️ Debes indicar al menos una categoría por mención o ID.");
+      }
+
+      const protectedChannelIds = new Set(
+        [
+          ALLOWED_CHANNEL_ID,
+          WELCOME_CHANNEL_ID,
+          GENERAL_CHANNEL_ID,
+          process.env.ANNOUNCEMENTS_CHANNEL_ID,
+          message.channel.id,
+        ].filter(Boolean)
+      );
+
+      const idPattern = /^\d{17,20}$/;
+      const targetIds = new Set();
+
+      for (const ch of message.mentions.channels.values()) {
+        if (ch.guildId === message.guild.id) {
+          targetIds.add(ch.id);
+        }
+      }
+
+      for (const token of rawTargets) {
+        const cleaned = token.replace(/[<#>]/g, "");
+        if (idPattern.test(cleaned)) {
+          targetIds.add(cleaned);
+        }
+      }
+
+      if (targetIds.size === 0) {
+        return message.reply("⚠️ No detecté categorías válidas. Usa mención o ID.");
+      }
+
+      const results = {
+        requested: targetIds.size,
+        deleted: [],
+        skipped: [],
+        failed: [],
+      };
+
+      for (const categoryId of targetIds) {
+        const category = await message.guild.channels.fetch(categoryId).catch(() => null);
+        if (!category) {
+          results.skipped.push(`${categoryId} (no encontrada)`);
+          continue;
+        }
+
+        if (category.guildId !== message.guild.id) {
+          results.skipped.push(`${categoryId} (otro servidor)`);
+          continue;
+        }
+
+        if (category.type !== ChannelType.GuildCategory) {
+          results.skipped.push(`${category.name} (${category.id}) (no es categoría)`);
+          continue;
+        }
+
+        const children = message.guild.channels.cache.filter((c) => c.parentId === category.id);
+        const hasProtectedChild = children.some((c) => protectedChannelIds.has(c.id));
+        if (hasProtectedChild) {
+          results.skipped.push(`${category.name} (${category.id}) (contiene canal protegido)`);
+          continue;
+        }
+
+        if (dryRun) {
+          results.skipped.push(`${category.name} (${category.id}) (dry-run, hijos: ${children.size})`);
+          continue;
+        }
+
+        try {
+          await category.delete(`Eliminada por comando !delete-category de ${message.author.tag}`);
+          results.deleted.push(`${category.name} (${category.id})`);
+        } catch (err) {
+          results.failed.push(`${category.name} (${category.id}): ${err.message ?? err}`);
+        }
+      }
+
+      const lines = [
+        `🧹 Resultado de !delete-category (${dryRun ? "DRY RUN" : "EJECUCION"})`,
+        `Solicitadas: ${results.requested}`,
+        `Eliminadas: ${results.deleted.length}`,
+        `Omitidas: ${results.skipped.length}`,
+        `Fallidas: ${results.failed.length}`,
+      ];
+
+      if (results.deleted.length) {
+        lines.push("", "✅ Eliminadas:", ...results.deleted.map((x) => `- ${x}`));
+      }
+      if (results.skipped.length) {
+        lines.push("", "⏭️ Omitidas:", ...results.skipped.map((x) => `- ${x}`));
+      }
+      if (results.failed.length) {
+        lines.push("", "❌ Fallidas:", ...results.failed.map((x) => `- ${x}`));
+      }
+
+      await message.channel.send("```\n" + lines.join("\n") + "\n```");
+      logResponseOrigin({
+        command: "!delete-category",
+        message,
+        action: doConfirm ? "delete" : "dry-run",
+        requested: results.requested,
+        deleted: results.deleted.length,
+        skipped: results.skipped.length,
+        failed: results.failed.length,
+        dryRun,
+      });
       return;
     }
 
