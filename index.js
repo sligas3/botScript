@@ -170,6 +170,124 @@ client.on("messageCreate", async (message) => {
       return;
     }
 
+    if (message.content.startsWith("!delete-channel")) {
+      const args = message.content.split(/\s+/).slice(1).filter(Boolean);
+      const dryRun = args.includes("--dry-run");
+      const doConfirm = args.includes("--confirm");
+
+      if (!dryRun && !doConfirm) {
+        return message.reply("🧹 Uso: `!delete-channel --dry-run <#canal|canal_id>...` o `!delete-channel --confirm <#canal|canal_id>...`");
+      }
+
+      if (!message.member.permissions.has(PermissionsBitField.Flags.ManageChannels)) {
+        return message.reply("❌ Necesitas el permiso **ManageChannels** para usar este comando.");
+      }
+
+      const botMember = message.guild.members.me;
+      if (!botMember?.permissions.has(PermissionsBitField.Flags.ManageChannels)) {
+        return message.reply("❌ No tengo permiso **ManageChannels** para eliminar canales.");
+      }
+
+      const rawTargets = args.filter((a) => a !== "--dry-run" && a !== "--confirm");
+      if (rawTargets.length === 0) {
+        return message.reply("⚠️ Debes indicar al menos un canal por mención o ID.");
+      }
+
+      const protectedIds = new Set(
+        [
+          ALLOWED_CHANNEL_ID,
+          WELCOME_CHANNEL_ID,
+          GENERAL_CHANNEL_ID,
+          process.env.ANNOUNCEMENTS_CHANNEL_ID,
+          message.channel.id,
+        ].filter(Boolean)
+      );
+
+      const idPattern = /^\d{17,20}$/;
+      const targetIds = new Set();
+
+      for (const ch of message.mentions.channels.values()) {
+        if (ch.guildId === message.guild.id) {
+          targetIds.add(ch.id);
+        }
+      }
+
+      for (const token of rawTargets) {
+        const cleaned = token.replace(/[<#>]/g, "");
+        if (idPattern.test(cleaned)) {
+          targetIds.add(cleaned);
+        }
+      }
+
+      if (targetIds.size === 0) {
+        return message.reply("⚠️ No detecté canales válidos. Usa mención (#canal) o ID.");
+      }
+
+      const results = {
+        requested: targetIds.size,
+        deleted: [],
+        skipped: [],
+        failed: [],
+      };
+
+      for (const channelId of targetIds) {
+        if (protectedIds.has(channelId)) {
+          results.skipped.push(`${channelId} (protegido)`);
+          continue;
+        }
+
+        const channel = await message.guild.channels.fetch(channelId).catch(() => null);
+        if (!channel) {
+          results.skipped.push(`${channelId} (no encontrado)`);
+          continue;
+        }
+
+        if (channel.guildId !== message.guild.id) {
+          results.skipped.push(`${channelId} (otro servidor)`);
+          continue;
+        }
+
+        const canDeleteType = channel.type === ChannelType.GuildText || channel.type === ChannelType.GuildVoice;
+        if (!canDeleteType) {
+          results.skipped.push(`${channel.name} (${channel.id}) (tipo no permitido)`);
+          continue;
+        }
+
+        if (dryRun) {
+          results.skipped.push(`${channel.name} (${channel.id}) (dry-run)`);
+          continue;
+        }
+
+        try {
+          await channel.delete(`Eliminado por comando !delete-channel de ${message.author.tag}`);
+          results.deleted.push(`${channel.name} (${channelId})`);
+        } catch (err) {
+          results.failed.push(`${channel.name} (${channelId}): ${err.message ?? err}`);
+        }
+      }
+
+      const lines = [
+        `🧹 Resultado de !delete-channel (${dryRun ? "DRY RUN" : "EJECUCION"})`,
+        `Solicitados: ${results.requested}`,
+        `Eliminados: ${results.deleted.length}`,
+        `Omitidos: ${results.skipped.length}`,
+        `Fallidos: ${results.failed.length}`,
+      ];
+
+      if (results.deleted.length) {
+        lines.push("", "✅ Eliminados:", ...results.deleted.map((x) => `- ${x}`));
+      }
+      if (results.skipped.length) {
+        lines.push("", "⏭️ Omitidos:", ...results.skipped.map((x) => `- ${x}`));
+      }
+      if (results.failed.length) {
+        lines.push("", "❌ Fallidos:", ...results.failed.map((x) => `- ${x}`));
+      }
+
+      await message.channel.send("```\n" + lines.join("\n") + "\n```");
+      return;
+    }
+
     if (message.content.startsWith("!reminder")) {
       const args = message.content.split(" ").slice(1);
       const timeStr = args.shift();
